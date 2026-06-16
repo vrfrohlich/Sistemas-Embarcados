@@ -1,0 +1,10 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.extensionActivationMode": "always",
+  "idf.espIdfPath": "C:\\esp\\v6.0.1\\esp-idf",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:\\Repositorios\\Pessoal\\Sistemas_Embarcados\\GB\\Projeto_GB-Monitor_de_temperatura\\build"
+  ]
+}
