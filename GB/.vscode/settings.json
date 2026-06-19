@@ -6,5 +6,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Repositorios\\Pessoal\\Sistemas_Embarcados\\GB\\Projeto_GB-Monitor_de_temperatura\\build"
-  ]
+  ],
+  "idf.currentSetup": "C:\\esp\\v6.0.1\\esp-idf"
 }

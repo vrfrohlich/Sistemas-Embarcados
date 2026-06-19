@@ -2,9 +2,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "rom/ets_sys.h"
+
+#include "nvs_flash.h"
+#include "http_client.h"
 
 /* Pinos */
 #define DHT11_PIN       4
@@ -17,8 +21,9 @@
 static const char *TAG = "MONITOR";
 
 /* Limites de alerta — alteráveis em runtime via terminal (task_console) */
-static volatile float g_temp_limite = 25.0f;
-static volatile float g_umid_limite = 80.0f;
+static float g_temp_limite = 25.0f;
+static float g_umid_limite = 80.0f;
+static SemaphoreHandle_t g_limites_mutex;
 
 /* Estrutura de dados do sensor */
 typedef struct {
@@ -86,7 +91,7 @@ static void task_sensor(void *arg)
             ESP_LOGI(TAG, "Temperatura: %.1f C  |  Umidade: %.1f %%",
                      leitura.temperature, leitura.humidity);
         } else {
-            ESP_LOGW(TAG, "Falha na leitura (erro %d)", ret);
+            //ESP_LOGW(TAG, "Falha na leitura (erro %d)", ret);
         }
 
         xQueueSend(fila_leds, &leitura, 0);
@@ -127,8 +132,13 @@ static void task_leds_botoes(void *arg)
         btn2_prev = btn2;
 
         if (tem_dado && leitura.valida) {
-            bool temp_alta  = (leitura.temperature >= g_temp_limite);
-            bool umid_alta  = (leitura.humidity    >= g_umid_limite);
+            xSemaphoreTake(g_limites_mutex, portMAX_DELAY);
+            float temp_lim = g_temp_limite;
+            float umid_lim = g_umid_limite;
+            xSemaphoreGive(g_limites_mutex);
+
+            bool temp_alta  = (leitura.temperature >= temp_lim);
+            bool umid_alta  = (leitura.humidity    >= umid_lim);
             bool em_alerta  = temp_alta || umid_alta;
             bool silenciado = (agora < silenciar_ate);
 
@@ -137,10 +147,10 @@ static void task_leds_botoes(void *arg)
             if (em_alerta && !silenciado) {
                 if (temp_alta)
                     ESP_LOGW(TAG, "ALERTA — Temperatura: %.1f C (limite: %.1f C)",
-                             leitura.temperature, g_temp_limite);
+                             leitura.temperature, temp_lim);
                 if (umid_alta)
                     ESP_LOGW(TAG, "ALERTA — Umidade: %.1f %% (limite: %.1f %%)",
-                             leitura.humidity, g_umid_limite);
+                             leitura.humidity, umid_lim);
             }
         }
     }
@@ -172,16 +182,23 @@ static void task_console(void *arg)
             float val;
 
             if (sscanf(linha, "temp %f", &val) == 1) {
+                xSemaphoreTake(g_limites_mutex, portMAX_DELAY);
                 g_temp_limite = val;
-                ESP_LOGI(TAG, "Limite de temperatura atualizado para %.1f C", g_temp_limite);
+                xSemaphoreGive(g_limites_mutex);
+                ESP_LOGI(TAG, "Limite de temperatura atualizado para %.1f C", val);
 
             } else if (sscanf(linha, "umid %f", &val) == 1) {
+                xSemaphoreTake(g_limites_mutex, portMAX_DELAY);
                 g_umid_limite = val;
-                ESP_LOGI(TAG, "Limite de umidade atualizado para %.1f %%", g_umid_limite);
+                xSemaphoreGive(g_limites_mutex);
+                ESP_LOGI(TAG, "Limite de umidade atualizado para %.1f %%", val);
 
             } else if (linha[0] == 'l') {
-                ESP_LOGI(TAG, "Limites atuais — temp: %.1f C  |  umid: %.1f %%",
-                         g_temp_limite, g_umid_limite);
+                xSemaphoreTake(g_limites_mutex, portMAX_DELAY);
+                float t = g_temp_limite;
+                float u = g_umid_limite;
+                xSemaphoreGive(g_limites_mutex);
+                ESP_LOGI(TAG, "Limites atuais — temp: %.1f C  |  umid: %.1f %%", t, u);
 
             } else {
                 ESP_LOGW(TAG, "Comando desconhecido. Use: 'temp <val>', 'umid <val>', 'limites'");
@@ -207,7 +224,7 @@ static void task_http(void *arg)
         if (xQueueReceive(fila_http, &leitura, portMAX_DELAY) != pdTRUE) continue;
         if (!leitura.valida) continue;
 
-        /* TODO: colega implementa o envio HTTP aqui */
+        http_enviar(leitura.temperature, leitura.humidity);
     }
 }
 
@@ -226,8 +243,23 @@ void app_main(void)
     ESP_LOGI(TAG, "Monitor iniciado — sensor:GPIO%d  LED_R:GPIO%d  BTN1:GPIO%d  BTN2:GPIO%d",
              DHT11_PIN, LED_RED_PIN, BTN1_PIN, BTN2_PIN);
 
-    fila_leds = xQueueCreate(5, sizeof(sensor_data_t));
-    fila_http = xQueueCreate(5, sizeof(sensor_data_t));
+    fila_leds      = xQueueCreate(5, sizeof(sensor_data_t));
+    fila_http      = xQueueCreate(5, sizeof(sensor_data_t));
+    g_limites_mutex = xSemaphoreCreateMutex();
+
+
+
+    // Inicializa NVS (necessário para WiFi)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Conecta ao WiFi (sem WiFi, o envio HTTP simplesmente não vai funcionar)
+    http_wifi_init();
+
 
     xTaskCreate(task_sensor,      "sensor",      2048, NULL, 2, &xSensorTask);
     xTaskCreate(task_leds_botoes, "leds_botoes", 2048, NULL, 3, NULL);
